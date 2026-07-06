@@ -39,108 +39,6 @@ from voc_cfg import TRAIN_CFG, VOC_CATEGORIES
 
 import tensorflow as tf
 
-def gpu_allocation(memory_limit_mb):
-    gpus = tf.config.list_physical_devices('GPU')
-    if not gpus:
-        print("No GPUs found, running on CPU.")
-        return
-    if platform.system() == "Darwin":
-        logical = tf.config.list_logical_devices('GPU')
-        print(f"Apple Metal/MPS GPU detected: {len(gpus)} physical, "
-              f"{len(logical)} logical. Skipping CUDA memory limit.")
-        return
-    try:
-        tf.config.set_logical_device_configuration(
-            gpus[0],
-            [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit_mb)]
-        )
-        logical = tf.config.list_logical_devices('GPU')
-        print(f"GPU configured: {len(gpus)} physical, {len(logical)} logical "
-              f"({memory_limit_mb} MB limit)")
-    except RuntimeError as e:
-        print(f"GPU config error (must be called before any TF op): {e}")
-
-gpu_allocation(TRAIN_CFG["gpu_memory"])
-
-tf.config.optimizer.set_jit(False)
-
-from yolov8_architecture.yolov8_architecture import build_yolov8
-from voc_loader import VOCLoader
-from training.trainer import YOLOv8Trainer, decode_preds
-from training.metrics import DetectionEvaluator
-from losses.yolov8_loss import YOLOv8Loss
-
-tf.random.set_seed(TRAIN_CFG["seed"])
-
-
-def copy_compatible_weights(src_model, dst_model):
-    """Copy weights between train/inference graphs, skipping decode-only layers."""
-    def default_layer_index(name, prefix):
-        if name == prefix:
-            return 0
-        marker = prefix + "_"
-        if name.startswith(marker):
-            suffix = name[len(marker):]
-            if suffix.isdigit():
-                return int(suffix)
-        return None
-
-    layer_specs = [
-        (tf.keras.layers.Conv2D, "conv2d"),
-        (tf.keras.layers.BatchNormalization, "batch_normalization"),
-    ]
-    copied = 0
-    skipped = []
-
-    for layer_type, prefix in layer_specs:
-        src_by_idx = {}
-        dst_indices = []
-        for layer in src_model.layers:
-            if isinstance(layer, layer_type):
-                idx = default_layer_index(layer.name, prefix)
-                if idx is not None:
-                    src_by_idx[idx] = layer
-        for layer in dst_model.layers:
-            if isinstance(layer, layer_type):
-                idx = default_layer_index(layer.name, prefix)
-                if idx is not None:
-                    dst_indices.append(idx)
-
-        if not src_by_idx or not dst_indices:
-            continue
-
-        offset = min(dst_indices) - min(src_by_idx)
-        for dst_layer in dst_model.layers:
-            if not isinstance(dst_layer, layer_type):
-                continue
-            dst_idx = default_layer_index(dst_layer.name, prefix)
-            if dst_idx is None:
-                continue
-
-            src_layer = src_by_idx.get(dst_idx - offset)
-            dst_weights = dst_layer.get_weights()
-            if src_layer is None:
-                skipped.append((dst_layer.name, [w.shape for w in dst_weights]))
-                continue
-
-            src_weights = src_layer.get_weights()
-            if [w.shape for w in src_weights] != [w.shape for w in dst_weights]:
-                skipped.append((dst_layer.name, [w.shape for w in dst_weights]))
-                continue
-
-            dst_layer.set_weights(src_weights)
-            copied += 1
-
-    for dst_layer in dst_model.layers:
-        dst_weights = dst_layer.get_weights()
-        if dst_weights and not any(isinstance(dst_layer, spec[0]) for spec in layer_specs):
-            skipped.append((dst_layer.name, [w.shape for w in dst_weights]))
-
-    print(f"Copied {copied} compatible weight layers into inference model.")
-    if skipped:
-        print(f"Skipped {len(skipped)} inference-only layer(s):")
-        for name, shapes in skipped:
-            print(f"  {name}: {shapes}")
 
 # ── config ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -163,6 +61,37 @@ LOAD_PRETRAINED = True
 PRETRAINED_PT   = str(PROJECT_ROOT / "Ultralytics_Models" / f"yolov8{VARIANT}.pt")
 
 
+
+
+def gpu_allocation(memory_limit_mb):
+    gpus = tf.config.list_physical_devices('GPU')
+    if not gpus:
+        print("No GPUs found, running on CPU.")
+        return
+    try:
+        tf.config.set_logical_device_configuration(
+            gpus[0],
+            [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit_mb)]
+        )
+        logical = tf.config.list_logical_devices('GPU')
+        print(f"GPU configured: {len(gpus)} physical, {len(logical)} logical "
+              f"({memory_limit_mb} MB limit)")
+    except RuntimeError as e:
+        print(f"GPU config error (must be called before any TF op): {e}")
+
+gpu_allocation(TRAIN_CFG["gpu_memory"])
+
+tf.config.optimizer.set_jit(False)
+
+from yolov8_architecture.yolov8_architecture import build_yolov8_pair
+from voc_loader import VOCLoader
+from training.trainer import YOLOv8Trainer, decode_preds
+from training.metrics import DetectionEvaluator
+from losses.yolov8_loss import YOLOv8Loss
+
+tf.random.set_seed(TRAIN_CFG["seed"])
+
+
 # ── Variant-specific config overrides ──────────────────────────────────────
 # OLD: single shared TRAIN_CFG for all variants (no per-variant tuning)
 # NEW: for large/x + pretrained, apply three overrides critical for fine-tuning:
@@ -183,29 +112,23 @@ if __name__ == "__main__":
     # ── 1. Models ──────────────────────────────────────────────────────────
     print("\n── 1. Building models ──")
 
-    train_model = build_yolov8(
+    # train_model and inf_model share the same backbone/neck/head Variables
+    # (see build_paired_models) — no separate inf_model build + weight
+    # transfer step needed; training train_model updates are automatically
+    # visible in inf_model.
+    train_model, inf_model = build_yolov8_pair(
         variant=VARIANT,
         task=TASK,
         input_shape=TRAIN_CFG["imgsz"],
         num_classes=NUM_CLASS,
-        training=True,
     )
     print(f"\nTraining model outputs: {[o.shape for o in train_model.outputs]}")
+    print(f"Inference model output: {inf_model.output_shape}")
 
     if LOAD_PRETRAINED:
         from pretrained_loader_voc import load_ultralytics_weights_voc
         load_ultralytics_weights_voc(train_model, variant=VARIANT,
                                      pt_path=PRETRAINED_PT, verbose=True)
-
-    inf_model = build_yolov8(
-        variant=VARIANT,
-        task=TASK,
-        input_shape=TRAIN_CFG["imgsz"],
-        num_classes=NUM_CLASS,
-        training=False,
-        print_summary=False,
-    )
-    print(f"Inference model output: {inf_model.output_shape}")
 
     # ── 2. Data loaders ────────────────────────────────────────────────────
     print("\n── 2. Setting up data loaders ──")
@@ -374,7 +297,9 @@ if __name__ == "__main__":
 
     # ── 5. Save inference model ────────────────────────────────────────────
     print("\n── 5. Saving inference model ──")
-    copy_compatible_weights(train_model, inf_model)
+    # inf_model shares Variables with train_model (build_yolov8_pair), so the
+    # best-checkpoint weights loaded into train_model above are already
+    # reflected here — no transfer step needed.
     inf_model.save_weights(os.path.join(SAVE_DIR, "best_inference.weights.h5"))
     print(f"Inference weights → {SAVE_DIR}/best_inference.weights.h5")
 

@@ -224,14 +224,12 @@ class YOLOv8:
 
         return box_feats, cls_feats
 
-    def _build_detect_head_training(self, features):
+    def _final_projections(self, box_feats, cls_feats):
         """
-        Training head — outputs raw logits per scale.
-
-        Returns list of 3 tensors, one per detection scale:
-            [B, Hi*Wi, 4*reg_max + nc]   ← raw, no softmax/sigmoid
-
-        This is what YOLOv8Loss, TAL assigner, and decode_preds() expect.
+        Final 1x1 box/cls projection convs — built ONCE per scale and reused
+        by both the training and inference output paths (see
+        build_paired_models). Returns (box_raw, cls_raw): per-scale spatial
+        tensors [B, H, W, 4*reg_max] / [B, H, W, nc], before reshape.
         """
         # Per-stride prior bias matching Ultralytics Detect.bias_init():
         #   bias = log(5 / nc / (imgsz/stride)²)
@@ -242,63 +240,49 @@ class YOLOv8:
             for s in strides
         ]
 
-        box_feats, cls_feats = self._head_convs(features)
-        outputs = []
+        box_raw, cls_raw = [], []
         for i, (bx, cx) in enumerate(zip(box_feats, cls_feats)):
-            # Final box projection: [B, H, W, 4*reg_max]
             # bias_initializer=1.0 matches Ultralytics Detect.bias_init(): a[-1].bias[:] = 1.0
             box = layers.Conv2D(
                 4 * self.reg_max, 1, padding="same", use_bias=True,
                 kernel_initializer=tf.keras.initializers.HeNormal(),
                 bias_initializer=tf.keras.initializers.Constant(1.0),
             )(bx)
-            box = layers.Reshape((-1, 4 * self.reg_max))(box)
-
-            # Final cls projection: [B, H, W, nc]  — raw logits, no sigmoid
             cls = layers.Conv2D(
                 self.num_classes, 1, padding="same", use_bias=True,
                 kernel_initializer=tf.keras.initializers.HeNormal(),
                 bias_initializer=tf.keras.initializers.Constant(cls_biases[i]),
             )(cx)
-            cls = layers.Reshape((-1, self.num_classes))(cls)
+            box_raw.append(box)
+            cls_raw.append(cls)
 
+        return box_raw, cls_raw
+
+    def _training_outputs(self, box_raw, cls_raw):
+        """
+        Training head — outputs raw logits per scale.
+
+        Returns list of 3 tensors, one per detection scale:
+            [B, Hi*Wi, 4*reg_max + nc]   ← raw, no softmax/sigmoid
+
+        This is what YOLOv8Loss, TAL assigner, and decode_preds() expect.
+        """
+        outputs = []
+        for box, cls in zip(box_raw, cls_raw):
+            box = layers.Reshape((-1, 4 * self.reg_max))(box)
+            cls = layers.Reshape((-1, self.num_classes))(cls)
             # Concat along last dim: [B, Hi*Wi, 4*reg_max + nc]
             outputs.append(layers.Concatenate(axis=-1)([box, cls]))
-
         return outputs   # list of 3 tensors
 
-    def _build_detect_head_inference(self, features):
+    def _inference_output(self, box_raw, cls_raw):
         """
         Inference head — matches your original exactly.
         Outputs [B, 8400, 84]: decoded boxes (grid units) + sigmoid scores.
         Verified correct against Ultralytics in Netron — unchanged.
         """
-        
-        strides = [8, 16, 32]
-        cls_biases = [
-            math.log(5 / self.num_classes / (self.input_shape / s) ** 2)
-            for s in strides
-        ]
-
-        box_feats, cls_feats = self._head_convs(features)
-        box_preds, cls_preds = [], []
-
-        for i, (bx, cx) in enumerate(zip(box_feats, cls_feats)):
-            box = layers.Conv2D(
-                4 * self.reg_max, 1, padding="same", use_bias=True,
-                kernel_initializer=tf.keras.initializers.HeNormal(),
-                bias_initializer=tf.keras.initializers.Constant(1.0),
-            )(bx)
-            box = layers.Reshape((-1, 4 * self.reg_max))(box)
-            box_preds.append(box)
-
-            cls = layers.Conv2D(
-                self.num_classes, 1, padding="same", use_bias=True,
-                kernel_initializer=tf.keras.initializers.HeNormal(),
-                bias_initializer=tf.keras.initializers.Constant(cls_biases[i]),
-            )(cx)
-            cls = layers.Reshape((-1, self.num_classes))(cls)
-            cls_preds.append(cls)
+        box_preds = [layers.Reshape((-1, 4 * self.reg_max))(b) for b in box_raw]
+        cls_preds = [layers.Reshape((-1, self.num_classes))(c) for c in cls_raw]
 
         all_boxes   = layers.Concatenate(axis=1)(box_preds)
         all_classes = layers.Concatenate(axis=1)(cls_preds)
@@ -317,6 +301,22 @@ class YOLOv8:
         final_classes = layers.Activation("sigmoid")(all_classes)
         return layers.Concatenate(axis=-1)([final_boxes, final_classes])
 
+    def _build_detect_head_training(self, features):
+        """Standalone training head (used by build_model()): builds its own
+        final projection convs — NOT shared with a separately-built inference
+        model. For a (train_model, inf_model) pair that shares weights with
+        no transfer step, use build_paired_models() instead."""
+        box_feats, cls_feats = self._head_convs(features)
+        box_raw, cls_raw = self._final_projections(box_feats, cls_feats)
+        return self._training_outputs(box_raw, cls_raw)
+
+    def _build_detect_head_inference(self, features):
+        """Standalone inference head (used by build_model()) — see note on
+        _build_detect_head_training."""
+        box_feats, cls_feats = self._head_convs(features)
+        box_raw, cls_raw = self._final_projections(box_feats, cls_feats)
+        return self._inference_output(box_raw, cls_raw)
+
     # ------------------------------------------------------------------
     # build_model
     # ------------------------------------------------------------------
@@ -329,8 +329,10 @@ class YOLOv8:
             True  → training model, outputs list of 3 raw-logit tensors
             False → inference model, outputs [B, 8400, 84] (default)
 
-        Both models are built from the same functional graph — identical
-        weights, different output nodes.
+        NOTE: each call builds a brand-new graph (new Conv2D/BN layer
+        objects) — two separate calls do NOT share weights. To get a
+        (train_model, inf_model) pair that shares weights with no transfer
+        step required, use build_paired_models() instead.
         """
         inputs       = layers.Input(
             shape=(self.input_shape, self.input_shape, 3))
@@ -354,6 +356,50 @@ class YOLOv8:
             model.summary()
         return model
 
+    def build_paired_models(self, print_summary=True):
+        """
+        Build (train_model, inf_model) from ONE shared graph: backbone, neck,
+        head_convs, and the final box/cls projection convs are built once
+        and reused by both output paths. The two Model() objects are
+        separate computation graphs (inf_model has no training-only ops, so
+        deployment latency/op-count is unaffected) but they reference the
+        SAME underlying Conv2D/BatchNormalization Variable objects — so
+        weight updates made via train_model are automatically visible in
+        inf_model, with no save/load/transfer step required.
+
+        This avoids the fragile alternative of building train_model and
+        inf_model independently and copying weights afterward: Keras
+        auto-names unnamed layers from a process-global counter, so by-name
+        weight matching between independently-built graphs can silently
+        match the wrong layer; and `model.layers` order is a topological
+        traversal that depends on the model's output structure, so
+        positional matching is unreliable too (both were tried and both hit
+        real shape-mismatch failures).
+        """
+        if self.task != "detect":
+            raise ValueError(f"Unsupported task: {self.task}")
+
+        inputs       = layers.Input(
+            shape=(self.input_shape, self.input_shape, 3))
+        backbone_out = self._build_backbone(inputs)
+        neck_out     = self._build_neck(backbone_out)
+        feat_indices = HEAD_CFG["from"]
+        features     = [neck_out[i] for i in feat_indices]
+
+        box_feats, cls_feats = self._head_convs(features)
+        box_raw, cls_raw     = self._final_projections(box_feats, cls_feats)
+
+        train_outputs = self._training_outputs(box_raw, cls_raw)
+        infer_output  = self._inference_output(box_raw, cls_raw)
+
+        train_model = Model(inputs=inputs, outputs=train_outputs,
+                            name=f"YOLOv8_{self.variant}_{self.task}_train")
+        inf_model   = Model(inputs=inputs, outputs=infer_output,
+                            name=f"YOLOv8_{self.variant}_{self.task}_infer")
+        if print_summary:
+            train_model.summary()
+        return train_model, inf_model
+
 
 def build_yolov8(variant="s", task="detect", input_shape=640,
                  num_classes=80, reg_max=16, training=False, print_summary=True):
@@ -371,8 +417,23 @@ def build_yolov8(variant="s", task="detect", input_shape=640,
     ).build_model(training=training, print_summary=print_summary)
 
 
+def build_yolov8_pair(variant="s", task="detect", input_shape=640,
+                      num_classes=80, reg_max=16, print_summary=True):
+    """
+    Build (train_model, inf_model) sharing the same backbone/neck/head
+    weights — see YOLOv8.build_paired_models() for why this replaces
+    building the two models independently and transferring weights after
+    training.
+    """
+    return YOLOv8(
+        variant=variant, task=task,
+        input_shape=input_shape,
+        num_classes=num_classes,
+        reg_max=reg_max,
+    ).build_paired_models(print_summary=print_summary)
+
+
 if __name__ == "__main__":
-    inf_model   = build_yolov8(variant="n", training=False)
-    train_model = build_yolov8(variant="n", training=True)
+    train_model, inf_model = build_yolov8_pair(variant="n", num_classes=20)
     print("Inference output:", inf_model.output_shape)
     print("Training outputs:", [o.shape for o in train_model.outputs])

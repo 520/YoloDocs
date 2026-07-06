@@ -28,12 +28,12 @@ VOC_CATEGORIES = [
 
 TRAIN_CFG = {
     # ---- optimizer ----
-    "optimizer":        "SGD",      # trainer.py maps this to tf.keras.optimizers.legacy.SGD
+    # "optimizer":        "SGD",
     # "lr0":              0.01,       # SGD default
-    #"optimizer":        "Adam",     # coupled WD (wd adapted by 2nd moment)
-    #"optimizer":        "AdamW",    # decoupled WD (true AdamW, recommended)
-    "lr0":              0.01,      # Adam/AdamW from scratch
-    # "lr0":              0.0001,     # Adam/AdamW fine-tune (pretrained backbone)
+    "optimizer":        "Adam",     # coupled WD (wd adapted by 2nd moment)
+    # "optimizer":        "AdamW",    # decoupled WD (true AdamW, recommended)
+    # "lr0":              0.001,      # Adam/AdamW from scratch
+    "lr0":              0.0001,     # Adam/AdamW fine-tune (pretrained backbone)
     "lrf":              0.01,       # final LR = lr0 * lrf  → 1e-5
     "momentum":         0.937,      # beta_1 for Adam (momentum for SGD)
     "weight_decay":     0.0005,
@@ -45,10 +45,10 @@ TRAIN_CFG = {
     "warmup_bias_lr":   0.1,
 
     # ---- schedule ----
-    "epochs":           20,
+    "epochs":           1,
     # "cos_lr":           False,      # OLD: linear LR
     "cos_lr":           True,       # cosine schedule — better convergence especially for pretrained fine-tuning
-    "close_mosaic":     10,         # disable mosaic for last N epochs
+    "close_mosaic":     30,         # disable mosaic for last N epochs
 
     # ---- freeze (pretrained fine-tuning) ----
     # Epochs to freeze backbone+neck layers so only the head adapts first.
@@ -103,5 +103,5 @@ TRAIN_CFG = {
     "seed":             0,
 
     # ---- GPU VRAM ----
-    "gpu_memory":       20000,      # MB
+    "gpu_memory":       12000,      # MB
 }
