@@ -28,12 +28,12 @@ VOC_CATEGORIES = [
 
 TRAIN_CFG = {
     # ---- optimizer ----
-    # "optimizer":        "SGD",
-    # "lr0":              0.01,       # SGD default
-    "optimizer":        "Adam",     # coupled WD (wd adapted by 2nd moment)
+    "optimizer":        "SGD",
+    "lr0":              0.01,       # SGD default
+    # "optimizer":        "Adam",     # coupled WD (wd adapted by 2nd moment)
     # "optimizer":        "AdamW",    # decoupled WD (true AdamW, recommended)
     # "lr0":              0.001,      # Adam/AdamW from scratch
-    "lr0":              0.0001,     # Adam/AdamW fine-tune (pretrained backbone)
+    # "lr0":              0.0001,     # Adam/AdamW fine-tune (pretrained backbone)
     "lrf":              0.01,       # final LR = lr0 * lrf  → 1e-5
     "momentum":         0.937,      # beta_1 for Adam (momentum for SGD)
     "weight_decay":     0.0005,
@@ -45,10 +45,9 @@ TRAIN_CFG = {
     "warmup_bias_lr":   0.1,
 
     # ---- schedule ----
-    "epochs":           1,
-    # "cos_lr":           False,      # OLD: linear LR
-    "cos_lr":           True,       # cosine schedule — better convergence especially for pretrained fine-tuning
-    "close_mosaic":     30,         # disable mosaic for last N epochs
+    "epochs":           300,
+    "cos_lr":           False,      # linear LR
+    "close_mosaic":     10,         # disable mosaic for last N epochs
 
     # ---- freeze (pretrained fine-tuning) ----
     # Epochs to freeze backbone+neck layers so only the head adapts first.

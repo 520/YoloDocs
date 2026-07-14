@@ -46,7 +46,7 @@ IMGSZ      = TRAIN_CFG["imgsz"]   # 640
 BATCH      = 4                     # small for speed; increase to check more
 N_STAT_BATCHES = 20               # batches to collect class stats
 
-NC    = 20
+NC    = 8
 NAMES = VOC_CATEGORIES
 
 # Distinct colours per class (BGR for OpenCV)

@@ -48,7 +48,7 @@ VAL_DIR   = str(DATASET_ROOT / "images" / "val")
 
 VARIANT   = "n"
 # VARIANT   = "l"
-SAVE_DIR  = f"runs/yolov8{VARIANT}_voc"
+SAVE_DIR  = "runs/detect/train"
 TASK      = "detect"
 # NUM_CLASS = 20
 NUM_CLASS = 8
@@ -57,7 +57,7 @@ NUM_CLASS = 8
 # Set False to train from scratch.
 # When True: backbone+neck+box_head transferred; cls_head skipped (nc mismatch).
 # PRETRAINED_PT: path to local .pt file, or None to auto-download.
-LOAD_PRETRAINED = True
+LOAD_PRETRAINED = False
 PRETRAINED_PT   = str(PROJECT_ROOT / "Ultralytics_Models" / f"yolov8{VARIANT}.pt")
 
 
