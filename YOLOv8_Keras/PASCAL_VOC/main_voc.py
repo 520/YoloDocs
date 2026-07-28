@@ -59,7 +59,7 @@ NUM_CLASS = 8
 # Set False to train from scratch.
 # When True: backbone+neck+box_head transferred; cls_head skipped (nc mismatch).
 # PRETRAINED_PT: path to local .pt file, or None to auto-download.
-LOAD_PRETRAINED = False
+LOAD_PRETRAINED = True
 PRETRAINED_PT   = str(PROJECT_ROOT / "Ultralytics_Models" / f"yolov8{VARIANT}.pt")
 
 
@@ -199,7 +199,7 @@ if __name__ == "__main__":
         batch_size=TRAIN_CFG["batch"],
         cfg=TRAIN_CFG,
         augment=True,
-        mosaic=True,
+        mosaic=False,
     )
 
     val_loader = VOCLoader(
