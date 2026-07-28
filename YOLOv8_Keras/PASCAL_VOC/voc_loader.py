@@ -59,6 +59,7 @@ class VOCLoader:
         self.augment    = augment
         self.mosaic     = mosaic
         self.max_gt     = max_gt
+        self.mosaic_border = (-imgsz // 2, -imgsz // 2)
 
         cfg = cfg or {}
         self.mosaic_prob     = float(cfg.get("mosaic",      1.0))
@@ -143,21 +144,38 @@ class VOCLoader:
 
     def _load_mosaic(self, index):
         """
-        4-image mosaic. Matches Ultralytics load_mosaic() exactly.
-        Uses original image dimensions (no pre-resize).
+        4-image mosaic matching train_kerascv_yolov8xs_kitti.py.
+        Each source image is first resized so its longest side equals imgsz.
         Returns: img [2s, 2s, 3] uint8, labels [N, 5] (cls cx cy w h) pixels
         """
         s  = self.imgsz
-        yc = int(random.uniform(s // 2, 2 * s - s // 2))
-        xc = int(random.uniform(s // 2, 2 * s - s // 2))
+        yc, xc = (
+            int(random.uniform(-border, 2 * s + border))
+            for border in self.mosaic_border
+        )
 
-        indices = [index] + random.choices(range(len(self.img_files)), k=3)
+        indices = [index] + [
+            random.randint(0, len(self.img_files) - 1)
+            for _ in range(3)
+        ]
 
         mosaic_img    = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
         mosaic_labels = []
 
         for i, idx in enumerate(indices):
             img, labels, (h, w) = self._load_image_label(idx)
+
+            # Match train_kerascv_yolov8xs_kitti.py: resize every mosaic
+            # source image with preserved aspect ratio so max(H, W) == imgsz.
+            ratio = s / max(h, w)
+            new_w = max(1, int(round(w * ratio)))
+            new_h = max(1, int(round(h * ratio)))
+            img = cv2.resize(
+                img,
+                (new_w, new_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            h, w = new_h, new_w
 
             if   i == 0:  # top-left
                 x1a, y1a, x2a, y2a = max(xc-w, 0), max(yc-h, 0), xc, yc
@@ -187,7 +205,23 @@ class VOCLoader:
 
         if mosaic_labels:
             mosaic_labels = np.concatenate(mosaic_labels, 0)
-            np.clip(mosaic_labels[:, 1:], 0, 2 * s, out=mosaic_labels[:, 1:])
+            # Clip actual xyxy corners to the 2×imgsz canvas, then convert
+            # back to pixel cxcywh. Clipping cxcywh values directly would
+            # leave partially cropped boxes with incorrect geometry.
+            cx = mosaic_labels[:, 1]
+            cy = mosaic_labels[:, 2]
+            bw = mosaic_labels[:, 3]
+            bh = mosaic_labels[:, 4]
+            x1 = np.clip(cx - bw / 2, 0, 2 * s)
+            y1 = np.clip(cy - bh / 2, 0, 2 * s)
+            x2 = np.clip(cx + bw / 2, 0, 2 * s)
+            y2 = np.clip(cy + bh / 2, 0, 2 * s)
+            keep = ((x2 - x1) > 2) & ((y2 - y1) > 2)
+            mosaic_labels = mosaic_labels[keep]
+            mosaic_labels[:, 1] = (x1[keep] + x2[keep]) / 2
+            mosaic_labels[:, 2] = (y1[keep] + y2[keep]) / 2
+            mosaic_labels[:, 3] = x2[keep] - x1[keep]
+            mosaic_labels[:, 4] = y2[keep] - y1[keep]
         else:
             mosaic_labels = np.zeros((0, 5), dtype=np.float32)
 
@@ -343,7 +377,7 @@ class VOCLoader:
             img, labels = self._load_mosaic(idx)
             img, labels = self._random_affine(
                 img, labels,
-                border=(-s // 2, -s // 2))
+                border=self.mosaic_border)
 
         else:
             # ── Single image path ─────────────────────────────────────

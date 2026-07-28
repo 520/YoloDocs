@@ -24,6 +24,8 @@ Data paths (set below):
 import os
 import platform
 from pathlib import Path
+import cv2
+import numpy as np
 
 # Required for tf.keras.optimizers.legacy.* on TensorFlow/Keras 3 stacks.
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
@@ -59,6 +61,65 @@ NUM_CLASS = 8
 # PRETRAINED_PT: path to local .pt file, or None to auto-download.
 LOAD_PRETRAINED = False
 PRETRAINED_PT   = str(PROJECT_ROOT / "Ultralytics_Models" / f"yolov8{VARIANT}.pt")
+
+
+def save_train_previews(train_loader, output_dir, max_images=8):
+    """Save one processed train batch with ground-truth boxes."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    batch = next(iter(train_loader.build_dataset()))
+    images = batch["images"].numpy()
+    boxes = batch["gt_bboxes"].numpy()
+    labels = batch["gt_labels"].numpy()
+    masks = batch["mask_gt"].numpy()
+    imgsz = int(TRAIN_CFG["imgsz"])
+    save_count = min(len(images), max_images)
+
+    for i in range(save_count):
+        image = (np.clip(images[i], 0.0, 1.0) * 255).astype(np.uint8)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        for box, class_id, valid in zip(boxes[i], labels[i], masks[i]):
+            if not valid:
+                continue
+
+            x1, y1, x2, y2 = np.rint(
+                box * np.array([imgsz, imgsz, imgsz, imgsz])
+            ).astype(int)
+            x1, x2 = np.clip([x1, x2], 0, imgsz - 1)
+            y1, y2 = np.clip([y1, y2], 0, imgsz - 1)
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            class_id = int(class_id)
+            color = (
+                int((37 * class_id + 80) % 255),
+                int((17 * class_id + 160) % 255),
+                int((29 * class_id + 220) % 255),
+            )
+            class_name = (
+                VOC_CATEGORIES[class_id]
+                if 0 <= class_id < len(VOC_CATEGORIES)
+                else str(class_id)
+            )
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                image,
+                class_name,
+                (x1, max(y1 - 6, 16)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        output_path = output_dir / f"train_processed_{i:02d}.jpg"
+        if not cv2.imwrite(str(output_path), image):
+            raise OSError(f"Failed to save processed train image: {output_path}")
+
+    print(f"Saved {save_count} processed train images → {output_dir.resolve()}")
 
 
 
@@ -148,6 +209,12 @@ if __name__ == "__main__":
         cfg=TRAIN_CFG,
         augment=False,
         mosaic=False,
+    )
+
+    # Save processed train images with ground-truth boxes for visual checking.
+    save_train_previews(
+        train_loader,
+        Path(SAVE_DIR) / "train_preprocess_preview",
     )
 
     # ── 2.5. Pre-training evaluation (only when pretrained weights loaded) ──
