@@ -48,7 +48,7 @@ DATASET_ROOT = PROJECT_ROOT / "datasets" / "kitti"
 TRAIN_DIR = str(DATASET_ROOT / "images" / "train")
 VAL_DIR   = str(DATASET_ROOT / "images" / "val")
 
-VARIANT   = "n"
+VARIANT   = "s"
 # VARIANT   = "l"
 SAVE_DIR  = "runs/detect/train"
 TASK      = "detect"

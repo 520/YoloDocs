@@ -45,7 +45,7 @@ TRAIN_CFG = {
     "warmup_bias_lr":   0.1,
 
     # ---- schedule ----
-    "epochs":           300,
+    "epochs":           200,
     "cos_lr":           False,      # linear LR
     "close_mosaic":     10,         # disable mosaic for last N epochs
 
